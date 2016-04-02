@@ -1,0 +1,162 @@
+#!/bin/bash
+# ----------------------------------------------------------------------------------------
+# gmail v0.2
+# Check gmail for new messages, show count and list subjects
+# Usage: gmail [username]
+# Username from commandline is optional, the script will ask for it and for Gmail password
+# Dependencies: curl, sed
+# Known issues: Gmail's two-step authentication not implemented
+# ----------------------------------------------------------------------------------------
+# Changelog:
+# 0.2 title length as global constant; 
+# 0.1 first working version: authentication, unread count, new messages list
+
+# Failproof options; may be removed once the script has been debugged
+set -o nounset  # Same as set -u
+set -o errexit  # Same as set -e
+#set -o xtrace   # Same as set -x and produces verbose tracing for debugging
+
+# Save the script commandline arguments for later parsing
+readonly -a SCRIPT_ARGS=("$@")  # Global array with script commandline arguments
+
+# Global constants declaration
+readonly GMAIL_URL="https://mail.google.com/mail/feed/atom"
+readonly GMAIL_UNAUTH_TOKEN="<TITLE>Unauthorized</TITLE>"   # Serch for this in Gmail output to detect autorization error
+readonly TITLE_LENGTH=60   # Length of the message subject to show in the list
+
+# Global error codes declaration
+readonly ERROR_INT_FUNC_ARGS=100  # One of the internal funtions is missing some arguments
+readonly ERROR_INTER_CONNECT=101  # Can not connect to Gmail server
+readonly ERROR_GMAIL_CONNECT=102  # Can not authenticate with Gmail server
+
+print () {      # will echo arguments verbatim to error output (>&2)
+  if [[ "$#" -lt 1 ]]; then   # Exit with error if no arguments
+    exit $ERROR_INT_FUNC_ARGS
+  else
+    echo -e "$*" >&2
+  fi
+}
+
+readargs () { # Currently only reads first argument as Gmail login
+  if [[ "${#SCRIPT_ARGS[*]}" -gt 0 ]]; then
+    local USER="${SCRIPT_ARGS[0]}"
+    echo "$USER"
+  fi
+}
+
+readuser () { # Ask user for Gmail login if missing as argument
+  read -p "Login: " -er USER
+  while [[ -z "$USER" ]]; do
+    read -p "Login can not be empty: " -er USER
+  done
+  echo "$USER"
+}
+
+readpass () {   # Ask user for Gmail password to avoid storing
+  read -p "Password: " -esr PSWD  # Should be -esr PSWD
+  echo "" 1>&2                    # An ugly walkaround for read -r not feeding a line
+  while [[ -z "$PSWD" ]]; do
+    read -p "Password can not be empty: " -esr PSWD
+    echo "" 1>&2                  # An ugly walkaround for read -r not feeding a line
+  done
+  echo "$PSWD"
+}
+
+readmail () {   # Use curl to read Gmail new mail Atom feed
+  # Function expects two obligatory paprameters: login and password
+  if [[ "$#" -eq 2 ]]; then     # Exit with error if not 2 arguments
+  	local USER="$1"
+  	local PSWD="$2"
+  else
+  	exit $ERROR_INT_FUNC_ARGS
+  fi
+  
+  # Try connecting to Gmail and get new mail summary
+  local MAIL=$( curl -u "$USER":"$PSWD" -s "$GMAIL_URL" )
+  if [[ "$?" -ne 0 ]]; then   # curl exit code not 0: error connecting?
+    print "Error connecting to Gmail server (check internet connection)"
+    exit $ERROR_INTER_CONNECT
+  fi
+  
+  # Connected. Check for authentication error
+  echo "$MAIL" | grep $GMAIL_UNAUTH_TOKEN
+  if [[ "$?" -eq 0 ]]; then   # Authentication failed?
+    print "Error authenticating on Gmail (login: $USER, password: $PSWD)"
+    exit $ERROR_GMAIL_CONNECT
+  fi
+  
+  echo "$MAIL"
+}
+
+countmail () {    # Attempts to parse Gmail feed for <fullcount>N</fullcount> token
+  # Funtion expects the Gmail output as the argument
+  if [[ "$#" -lt 1 ]]; then   # Exit with error if missing or too many arguments
+  	exit $ERROR_INT_FUNC_ARGS
+  else
+    # Get the number of messages between the <fullcount> tag pair
+    local COUNT=$( echo "$*" | sed -n 's:.*<fullcount>\(.*\)</fullcount>.*:\1:p' )    
+  fi
+
+  echo "$COUNT"
+}
+
+stripmail () {    # Should strip Gmail XML feed's head (up to the first <entity>) and tail
+  # Function expects the Gmail output as the argument
+  if [[ "$#" -lt 1 ]]; then   # Exit with error if missing or too many arguments
+  	exit $ERROR_INT_FUNC_ARGS
+  else
+    # Strip the Gmail XML feed of the head (up to the first <entry> tag that immediately
+    # follows a </modified>) and of the tailing </feed> tag
+    local FEED=$( echo "$*" | sed -n 's|^.*</modified><entry>\(.*\)</feed>.*|<entry>\1|p' )
+  fi
+  
+  echo -e "$FEED"
+}
+
+formatmail () {  # Should format the stripped <entry> feed into a message list
+  # Funtion expects the Gmail XML feed stripped of header and tail and
+  # only containing <entry>...</entry> sections
+  if [[ "$#" -lt 1 ]]; then   # Exit with error if missing or too many arguments
+  	exit $ERROR_INT_FUNC_ARGS
+  else
+    # 1) replace </entry><entry> tag pairs with linebreaks to have every message on separate line
+    # 2) remove starting <entry> and the trailing </entry> tags
+    # 3) shorten the titles to $TITLE_LEN symbols and strip the <title> tag pair
+    # 4) replace the <summary>...</modified> segment of every line with "-" delimiter
+    # 5) ...
+    local FEED=$( echo "$*" | sed -e 's|</entry><entry>|\n|g' -e 's|<[/]*entry>||g')
+    FEED=$( echo "$FEED" | sed -e 's|</entry><entry>|\n|g' \
+    | sed -e 's|<[/]*entry>||g' \
+    -e "s|<title>\(.\{1,$TITLE_LENGTH\}\).*</title>.*<issued>\(.*\)T\(.*\)Z</issued>.*<email>\(.*\)</email>.*|\2,\3 - \1 (From: \4)|" )
+  fi
+  
+  echo "$FEED"
+  
+}
+
+main () {       # The main loop
+  # Setting the variables
+  local GMAIL_USER="user"       # Input Gmail username here.
+  local GMAIL_PSWD="password"   # Never do this!
+  local GMAIL_OUTPUT="-"        # This will store curl output from Gmail
+  local GMAIL_COUNT=0           # Number of new messages
+
+  GMAIL_USER=$(readargs)        # Read Gmail login from commandline paremeter
+  if [[ -z "$GMAIL_USER" ]]; then
+    GMAIL_USER=$( readuser )      # Ask user for login if missing in commandline
+  fi
+  GMAIL_PSWD=$( readpass )        # Ask for user password
+
+	# Try to connect to Gmail server to read new mail summary
+  GMAIL_OUTPUT=$( readmail "$GMAIL_USER" "$GMAIL_PSWD" )
+  GMAIL_COUNT=$( countmail "$GMAIL_OUTPUT" )
+
+  print "Unread messages: $GMAIL_COUNT"
+  if [[ "$GMAIL_COUNT" -gt 0 ]]; then
+    print "$( formatmail $( stripmail $GMAIL_OUTPUT ))"
+  fi
+}
+
+# The main program
+main
+exit 0
