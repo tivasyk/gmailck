@@ -2,9 +2,10 @@
 A simple commandline Gmail checker bash script: will check gmail for new messages, show count and list subjects of 20 most recent unread emails
 
 ## Usage: 
-...
+```
 ./gmail [username]
-...
+```
+
 [username] is optional, the script will ask for the Gmail login if not provided. Gmail password is not stored in any way and will be asked every 
 time.
 
